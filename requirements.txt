@@ -1,0 +1,11 @@
+langchain-groq
+langchain-core
+langgraph
+pydantic>=2.0
+python-dotenv
+langchain-ollama
+langgraph-cli[inmem]
+langchain-aws
+boto3
+ipykernel
+streamlit

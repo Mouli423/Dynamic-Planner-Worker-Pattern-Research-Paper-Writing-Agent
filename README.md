@@ -1,0 +1,1 @@
+#### Dynamic Planner-Worker pattern Research paper writing agent
