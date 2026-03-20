@@ -8,7 +8,7 @@ import json
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from research_agent.config import SafetyConfig
-from research_agent.llm import get_llm_with_structure
+from research_agent.llm import get_llm_with_structure,get_fallback_llm
 from research_agent.prompts import PLANNER_SYSTEM_PROMPT, REPLANNING_PROMPT
 from research_agent.state.schema import GraphState, PlannerDecisionOutput, ReplanningOutput
 from research_agent.utils.helpers import check_global_limits
@@ -72,9 +72,22 @@ def research_planner(state: GraphState) -> GraphState:
         planner_input["replanning_context"] = replanning
 
     # ── LLM call ──────────────────────────────────────────────────────────────
-    llm = get_llm_with_structure(PlannerDecisionOutput, temperature=0.3)
+    
     try:
-        result   = llm.invoke([
+        # llm = get_llm_with_structure(PlannerDecisionOutput, temperature=0.3)
+        # result   = llm.invoke([
+        #     SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+        #     HumanMessage(content=(
+        #         f"State: {json.dumps(planner_input, indent=2)}\n\n"
+        #         "Decide next worker. Use summaries for context.\n"
+        #         "Use retry_suggestions when retrying the same worker.\n"
+        #         "If replanning_context is present, apply it as feedback."
+        #     )),
+        # ])
+
+        try:
+            llm    = get_llm_with_structure(PlannerDecisionOutput, temperature=0.3)
+            result   = llm.invoke([
             SystemMessage(content=PLANNER_SYSTEM_PROMPT),
             HumanMessage(content=(
                 f"State: {json.dumps(planner_input, indent=2)}\n\n"
@@ -83,6 +96,21 @@ def research_planner(state: GraphState) -> GraphState:
                 "If replanning_context is present, apply it as feedback."
             )),
         ])
+            if result is None:
+                raise ValueError("Primary returned None")
+        except Exception as exc:
+            log.warning(f"Primary failed: {exc} — using fallback")
+            llm    = get_fallback_llm(PlannerDecisionOutput, temperature=0.3)
+            result   = llm.invoke([
+            SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+            HumanMessage(content=(
+                f"State: {json.dumps(planner_input, indent=2)}\n\n"
+                "Decide next worker. Use summaries for context.\n"
+                "Use retry_suggestions when retrying the same worker.\n"
+                "If replanning_context is present, apply it as feedback."
+            )),
+        ])
+
         response = result.model_dump()
         log.planner(
             f"Decision: → {response.get('next_worker')}  | Reasoning → {response.get('reasoning', '')} | Worker_input → {response.get("worker_input")}"
@@ -127,7 +155,24 @@ def replanning(state: GraphState) -> GraphState:
     }
 
     try:
-        result = llm.invoke([
+        # llm = get_llm_with_structure(ReplanningOutput, temperature=0.2)
+        # result = llm.invoke([
+        #     SystemMessage(content=REPLANNING_PROMPT),
+        #     HumanMessage(content=f"Replanning input:\n{replanning_input}"),
+        # ])
+        try:
+            llm    = get_llm_with_structure(ReplanningOutput, temperature=0.2)
+            result = llm.invoke([
+            SystemMessage(content=REPLANNING_PROMPT),
+            HumanMessage(content=f"Replanning input:\n{replanning_input}"),
+        ])
+            if result is None:
+                raise ValueError("Primary returned None")
+            
+        except Exception as exc:
+            log.warning(f"Primary failed: {exc} — using fallback")
+            llm    = get_fallback_llm(ReplanningOutput, temperature=0.2)
+            result = llm.invoke([
             SystemMessage(content=REPLANNING_PROMPT),
             HumanMessage(content=f"Replanning input:\n{replanning_input}"),
         ])
@@ -138,4 +183,4 @@ def replanning(state: GraphState) -> GraphState:
         }
     except Exception as exc:
         log.error("Replanning error", exc=exc)
-        return {**state, "replanning_context": {}}
+        return {"replanning_context": {}}

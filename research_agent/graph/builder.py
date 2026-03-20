@@ -4,9 +4,12 @@ Builds and compiles the LangGraph StateGraph.
 
 Node layout
 -----------
-START → planner → [worker]* → summarizer → evaluator → planner  (loop)
-                     ↓
-               research_evaluation → [replanning → planner | fallback | END]
+START → planner → [worker]* → summarizer ─┐
+                             → evaluator  ─┴→ post_eval → planner  (loop)
+                     ↓ (on failure)
+                   planner  (skip summarizer/evaluator)
+
+planner → research_evaluation → [output_generator | replanning | fallback]
 planner → fallback → END  (on safety trip)
 """
 
@@ -62,31 +65,42 @@ def planner_router(state: GraphState) -> str:
     return next_worker
 
 
-def worker_router(state: GraphState) -> str:
+def worker_router(state: GraphState) -> str | list[str]:
     """
     Route AFTER a worker executes.
 
-    Success path : worker → summarizer → evaluator → planner  (normal)
-    Failure path : worker → planner                           (skip summarizer/evaluator)
-
-    A worker failure is signalled by current_worker being set but the
-    corresponding output_key being None/unchanged, OR by consecutive_failures
-    having just incremented. We detect it via the last execution_history entry.
+    Success path : worker → [summarizer, evaluator] in parallel → post_eval → planner
+    Failure path : worker → planner  (skip summarizer/evaluator entirely)
     """
-    # Check last history entry for this step
+    if state.get("force_terminate"):
+        return "fallback"
+
     history = state.get("execution_history") or []
     if history:
         last = history[-1]
         if isinstance(last, dict) and last.get("status") == "failure":
-            return "planner"   # skip summarizer/evaluator on failure
+            return "planner"   # failure → skip both, go straight to planner
 
-    # Also check force_terminate in case something upstream set it
+    # Success — fan out to both in parallel
+    return ["summarizer", "evaluator"]
+
+
+def post_eval_router(state: GraphState) -> str:
+    """
+    Route after both summarizer and evaluator have completed.
+    Mirrors the old evaluation_router logic.
+    """
     if state.get("force_terminate"):
         return "fallback"
+    decision = (state.get("evaluation_result") or {}).get("decision", "accept")
+    if decision == "accept":
+        return "planner"
+    limit_reached, _ = check_global_limits(state)
+    return "fallback" if limit_reached else "replanning"
 
-    return "summarizer"
 
 def evaluation_router(state: GraphState) -> str:
+    """Route after research_evaluation (final paper quality check)."""
     if state.get("force_terminate"):
         return "fallback"
     decision = (state.get("evaluation_result") or {}).get("decision", "accept")
@@ -95,31 +109,44 @@ def evaluation_router(state: GraphState) -> str:
     limit_reached, _ = check_global_limits(state)
     return "fallback" if limit_reached else "replanning"
 
+
+# ── Join node ──────────────────────────────────────────────────────────────────
+
+def post_eval_join(state: GraphState) -> GraphState:
+    """
+    Passthrough join node — LangGraph waits for BOTH summarizer and evaluator
+    to complete before executing this node. Their state updates are merged
+    automatically. We just pass state through to post_eval_router.
+    """
+    return state
+
+
 # ── Graph builder ──────────────────────────────────────────────────────────────
 
-def build_graph() -> StateGraph:
+def build_graph(checkpointer=None) -> StateGraph:
     """Construct and compile the research-agent StateGraph."""
     g = StateGraph(GraphState)
 
     # ── Nodes ──────────────────────────────────────────────────────────────────
-    g.add_node("planner",            research_planner)
-    g.add_node("topic_clarifier",    topic_clarifier)
-    g.add_node("outline_designer",   outline_designer)
-    g.add_node("introduction_writer",introduction_writer)
-    g.add_node("background_writer",  background_writer)
-    g.add_node("literature_review_writer", literature_review_writer)
-    g.add_node("research_gap_identifier",  research_gap_identifier)
-    g.add_node("methodology_designer",     methodology_designer)
-    g.add_node("results_writer",     results_writer)
-    g.add_node("discussion_writer",  discussion_writer)
-    g.add_node("conclusion_writer",  conclusion_writer)
-    g.add_node("references_writer",  references_writer)
-    g.add_node("research_evaluation",research_evaluator)
-    g.add_node("output_generator",        generate_output)
-    g.add_node("replanning",         replanning)
-    g.add_node("fallback",           fallback_handler)
-    g.add_node("summarizer",         create_worker_summary)
-    g.add_node("evaluator",          evaluate_worker_output)
+    g.add_node("planner",                      research_planner)
+    g.add_node("topic_clarifier",              topic_clarifier)
+    g.add_node("outline_designer",             outline_designer)
+    g.add_node("introduction_writer",          introduction_writer)
+    g.add_node("background_writer",            background_writer)
+    g.add_node("literature_review_writer",     literature_review_writer)
+    g.add_node("research_gap_identifier",      research_gap_identifier)
+    g.add_node("methodology_designer",         methodology_designer)
+    g.add_node("results_writer",               results_writer)
+    g.add_node("discussion_writer",            discussion_writer)
+    g.add_node("conclusion_writer",            conclusion_writer)
+    g.add_node("references_writer",            references_writer)
+    g.add_node("research_evaluation",          research_evaluator)
+    g.add_node("output_generator",             generate_output)
+    g.add_node("replanning",                   replanning)
+    g.add_node("fallback",                     fallback_handler)
+    g.add_node("summarizer",                   create_worker_summary)
+    g.add_node("evaluator",                    evaluate_worker_output)
+    g.add_node("post_eval",                    post_eval_join)   # ← new join node
 
     # ── Edges ──────────────────────────────────────────────────────────────────
     g.add_edge(START, "planner")
@@ -131,27 +158,49 @@ def build_graph() -> StateGraph:
         {w: w for w in _ALLOWED_WORKERS} | {"fallback": "fallback"},
     )
 
-    # Every content worker → summarizer → evaluator → planner
+    # Every content worker → fan out to summarizer + evaluator in parallel
+    # OR → planner directly on failure
     for w in _CONTENT_WORKERS:
         g.add_conditional_edges(
-            w, worker_router,
-            {"summarizer": "summarizer", "planner": "planner", "fallback": "fallback"},
+            w,
+            worker_router,
+            {
+                "summarizer": "summarizer",  # parallel branch 1
+                "evaluator":  "evaluator",   # parallel branch 2
+                "planner":    "planner",     # failure shortcut
+                "fallback":   "fallback",    # force terminate
+            },
         )
 
-    g.add_edge("summarizer",  "evaluator")
-    g.add_edge("evaluator",   "planner")
+    # Both summarizer and evaluator feed into post_eval join node
+    # LangGraph waits for both before firing post_eval
+    g.add_edge("summarizer", "post_eval")
+    g.add_edge("evaluator",  "post_eval")
 
-    # research_evaluation → accept/replan/fallback
+    # post_eval → planner (accept) or replanning/fallback (reject)
     g.add_conditional_edges(
-        "research_evaluation", evaluation_router,
-        {"output_generator": "output_generator",
-         "replanning":       "replanning",
-         "fallback":         "fallback"},
+        "post_eval",
+        post_eval_router,
+        {
+            "planner":    "planner",
+            "replanning": "replanning",
+            "fallback":   "fallback",
+        },
+    )
+
+    # research_evaluation → final routing
+    g.add_conditional_edges(
+        "research_evaluation",
+        evaluation_router,
+        {
+            "output_generator": "output_generator",
+            "replanning":       "replanning",
+            "fallback":         "fallback",
+        },
     )
 
     g.add_edge("output_generator", END)
     g.add_edge("replanning",       "planner")
     g.add_edge("fallback",         END)
 
-    return g.compile()
-
+    return g.compile(checkpointer=checkpointer)

@@ -9,7 +9,9 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, TypedDict
 
 from pydantic import BaseModel, Field
 
-
+def _merge_dicts(a: dict, b: dict) -> dict:
+    """Merge two dicts — b values overwrite a on conflict."""
+    return {**a, **b}
 # ══════════════════════════════════════════════════════════════════════════════
 # Worker output models
 # ══════════════════════════════════════════════════════════════════════════════
@@ -201,7 +203,7 @@ class GraphState(TypedDict):
     next_worker:           Optional[str]
     worker_input:          Optional[str]
     final_paper:           Optional[Dict[str, Any]]
-    execution_history:     List[Dict[str, Any]]
+    execution_history:     Annotated[List[Dict], operator.add]
     current_worker:        Optional[str]
     worker_summaries:      Dict[str, Dict[str, Any]]
     worker_evaluations:    Dict[str, Dict[str, Any]]
@@ -210,7 +212,7 @@ class GraphState(TypedDict):
     # ── Safety Tracking ───────────────────────────────────────────────────────
     total_steps:                    int
     planner_call_count:             int
-    worker_metrics:                 Dict[str, WorkerMetrics]
+    worker_metrics:                 Annotated[Dict[str, Any], _merge_dicts]
     consecutive_failures:           int
     circuit_breaker_active:         bool
     circuit_breaker_cooldown_remaining: int

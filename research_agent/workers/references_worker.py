@@ -11,7 +11,7 @@ from datetime import datetime
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from research_agent.config import SafetyConfig
-from research_agent.llm import get_llm_with_structure
+from research_agent.llm import get_llm_with_structure, get_fallback_llm
 from research_agent.prompts import GENERIC_REFERENCES_WRITER_PROMPT
 from research_agent.state.schema import GraphState, ReferencesWriterOutput
 from research_agent.utils.helpers import (
@@ -124,14 +124,26 @@ def references_writer(state: GraphState) -> GraphState:
         "CRITICAL: DO NOT assume research domain! Only use citations actually found."
     )
 
-    llm = get_llm_with_structure(ReferencesWriterOutput, temperature=0.2)
+
     messages = [
         SystemMessage(content=GENERIC_REFERENCES_WRITER_PROMPT),
         HumanMessage(content=human_msg),
     ]
 
     try:
-        result  = llm.invoke(messages)
+        # llm = get_llm_with_structure(ReferencesWriterOutput, temperature=0.2)
+        # result  = llm.invoke(messages)
+
+        try:
+            llm    = get_llm_with_structure(ReferencesWriterOutput, temperature=0.2)
+            result = llm.invoke(messages)
+            if result is None:
+                raise ValueError("Primary returned None")
+        except Exception as exc:
+            log.warning(f"Primary failed: {exc} — using fallback")
+            llm    = get_fallback_llm(ReferencesWriterOutput, temperature=0.2)
+            result = llm.invoke(messages)
+            
         metrics = update_worker_metrics(state, _WORKER, success=True, output=result)
         log.worker(_WORKER, "References generated", status="success",worker_output=result)
 

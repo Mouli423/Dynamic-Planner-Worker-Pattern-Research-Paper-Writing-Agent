@@ -52,6 +52,8 @@ class LLMConfig:
     """LLM provider and model settings."""
 
     MODEL: str           = "openai.gpt-oss-120b-1:0"
+    FALLBACK_MODEL: str  = "amazon.nova-lite-v1:0"
+    AWS_REGION:     str   = "us-east-1"
     DEFAULT_TEMPERATURE: float = 0.7
 
     # Per-role temperatures (override default where precision matters)

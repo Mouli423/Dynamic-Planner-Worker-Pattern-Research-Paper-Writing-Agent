@@ -7,7 +7,7 @@ Runs after every summarizer call to decide accept / retry.
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from research_agent.config import EvaluationConfig
-from research_agent.llm import get_llm_with_structure
+from research_agent.llm import get_llm_with_structure,get_fallback_llm
 from research_agent.prompts.evaluator_prompts import get_worker_evaluation_prompt
 from research_agent.state.schema import GraphState, WorkerEvaluationOutput
 from research_agent.utils.logger import log
@@ -30,11 +30,11 @@ _OUTPUT_MAP = {
 def evaluate_worker_output(state: GraphState) -> GraphState:
     """Evaluate the latest worker's output and record the result in state."""
     if not EvaluationConfig.ENABLE_PER_WORKER_EVAL:
-        return state
+        return {}
 
     current_worker = state.get("current_worker")
     if not current_worker:
-        return state
+        return {}
 
     output_key    = _OUTPUT_MAP.get(current_worker)
     worker_output = state.get(output_key) if output_key else None
@@ -49,7 +49,7 @@ def evaluate_worker_output(state: GraphState) -> GraphState:
             "suggestions":   [f"{current_worker} must produce output"],
             "decision":      "retry",
         }
-        return {**state, "last_worker_evaluation": evaluation}
+        return {"last_worker_evaluation": evaluation}
 
     # Check existing retry count for this worker
     worker_evals = state.get("worker_evaluations", {})
@@ -60,11 +60,23 @@ def evaluate_worker_output(state: GraphState) -> GraphState:
         log.warning(f"Max retries reached for {current_worker} — accepting as-is")
         return state
 
-    llm = get_llm_with_structure(WorkerEvaluationOutput, temperature=0.3)
+    
     prompt = get_worker_evaluation_prompt(current_worker)
 
     try:
-        response = llm.invoke([
+        # llm = get_llm_with_structure(WorkerEvaluationOutput, temperature=0.3)
+        # response = llm.invoke([
+        #     SystemMessage(content=prompt),
+        #     HumanMessage(content=(
+        #         f"Worker: {current_worker}\n\n"
+        #         f"FULL OUTPUT TO EVALUATE:\n{worker_output}\n\n"
+        #         f"Evaluate based on the SPECIFIC criteria for {current_worker}."
+        #     )),
+        # ])
+
+        try:
+            llm    = get_llm_with_structure(WorkerEvaluationOutput, temperature=0.3)
+            response = llm.invoke([
             SystemMessage(content=prompt),
             HumanMessage(content=(
                 f"Worker: {current_worker}\n\n"
@@ -72,6 +84,20 @@ def evaluate_worker_output(state: GraphState) -> GraphState:
                 f"Evaluate based on the SPECIFIC criteria for {current_worker}."
             )),
         ])
+            if response is None:
+                raise ValueError("Primary returned None")
+        except Exception as exc:
+            log.warning(f"Primary failed: {exc} — using fallback")
+            llm    = get_fallback_llm(WorkerEvaluationOutput, temperature=0.3)
+            response = llm.invoke([
+            SystemMessage(content=prompt),
+            HumanMessage(content=(
+                f"Worker: {current_worker}\n\n"
+                f"FULL OUTPUT TO EVALUATE:\n{worker_output}\n\n"
+                f"Evaluate based on the SPECIFIC criteria for {current_worker}."
+            )),
+        ])
+            
         eval_data     = response.model_dump()
         quality_score = eval_data.get("quality_score", 0.5)
         passed        = quality_score >= EvaluationConfig.QUALITY_THRESHOLD
@@ -90,7 +116,6 @@ def evaluate_worker_output(state: GraphState) -> GraphState:
         log.evaluation(current_worker, quality_score, decision, evaluation["issues"])
 
         return {
-            **state,
             "worker_evaluations":    {**worker_evals, current_worker: evaluation},
             "last_worker_evaluation": evaluation,
         }
@@ -98,7 +123,6 @@ def evaluate_worker_output(state: GraphState) -> GraphState:
     except Exception as exc:
         log.error(f"Evaluation error for {current_worker}", exc=exc)
         return {
-            **state,
             "last_worker_evaluation": {
                 "worker_name":   current_worker,
                 "quality_score": 0.0,
