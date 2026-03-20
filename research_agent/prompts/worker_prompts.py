@@ -131,7 +131,7 @@ Constraints (STRICT):
 - Do NOT repeat literature summary
 - Do NOT introduce new concepts
 - Do NOT design methodology
-- Identify 3–4 gaps maximum. Write 200–300 words total.
+- Identify 3–4 gaps maximum. Write 250–350 words total.
 
 CRITICAL: Return ONLY structured output. No explanations. No tags.
 """

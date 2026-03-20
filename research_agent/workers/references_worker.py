@@ -143,13 +143,13 @@ def references_writer(state: GraphState) -> GraphState:
             log.warning(f"Primary failed: {exc} — using fallback")
             llm    = get_fallback_llm(ReferencesWriterOutput, temperature=0.2)
             result = llm.invoke(messages)
-            
-        metrics = update_worker_metrics(state, _WORKER, success=True, output=result)
+
+        metrics = update_worker_metrics(state, _WORKER, success=True, output=result.model_dump())
         log.worker(_WORKER, "References generated", status="success",worker_output=result)
 
         return {
-            **state,
-            "references":          result,
+            
+            "references":          result.model_dump(),
             "references_formatted": True,
             "current_worker":      _WORKER,
             "worker_metrics":      metrics,
@@ -166,7 +166,7 @@ def references_writer(state: GraphState) -> GraphState:
             log.circuit_breaker("Activated", worker_name=_WORKER, consecutive=consecutive)
 
         return {
-            **state,
+           
             "worker_metrics":      metrics,
             "total_steps":         state.get("total_steps", 0) + 1,
             "consecutive_failures": consecutive,

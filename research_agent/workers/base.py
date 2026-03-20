@@ -56,12 +56,12 @@ def run_worker(
             if result is None:
                 raise ValueError(f"Fallback model also returned None")
 
-        output  = result_transform(result) if result_transform else result
+        output  = result_transform(result) if result_transform else result.model_dump()
         metrics = update_worker_metrics(state, worker_name, success=True, output=output)
         log.worker(worker_name, "Completed successfully", status="success", worker_output=output)
 
         return {
-            **state,
+           
             output_key:              output,
             "current_worker":        worker_name,
             "worker_metrics":        metrics,
@@ -83,7 +83,7 @@ def run_worker(
             log.circuit_breaker("Activated", worker_name=worker_name, consecutive=consecutive)
 
         return {
-            **state,
+            
             "worker_metrics":        metrics,
             "total_steps":           state.get("total_steps", 0) + 1,
             "consecutive_failures":  consecutive,
